@@ -1,6 +1,6 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult};
+use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, StakingMsg};
 use cw2::set_contract_version;
 
 use crate::error::ContractError;
@@ -16,13 +16,20 @@ pub fn instantiate(
     deps: DepsMut,
     _env: Env,
     info: MessageInfo,
-    _msg: InstantiateMsg,
+    msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    // With `Response` type, it is possible to dispatch message to invoke external logic.
-    // See: https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md#dispatching-messages
+    // TODO: validate info
+    // TODO: validate msg
+
+    let delegate_msg = StakingMsg::Delegate {
+        validator: msg.validator,
+        amount: info.funds[0].clone(),
+    };
+
     Ok(Response::new()
+        .add_message(delegate_msg)
         .add_attribute("method", "instantiate")
         .add_attribute("owner", info.sender))
 }

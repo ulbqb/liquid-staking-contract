@@ -2,7 +2,9 @@ use cosmwasm_schema::{cw_serde, QueryResponses};
 
 /// Message type for `instantiate` entry_point
 #[cw_serde]
-pub struct InstantiateMsg {}
+pub struct InstantiateMsg {
+    pub validator: String,
+}
 
 /// Message type for `execute` entry_point
 #[cw_serde]
