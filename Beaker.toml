@@ -1,0 +1,42 @@
+name = "tutorial"
+gas_price = '0.015tcony'
+gas_adjustment = 1.3
+account_prefix = 'tlink'
+derivation_path = '''m/44'/438'/0'/0/0'''
+
+[networks.testnet]
+chain_id = 'ebony-2'
+network_variant = 'Shared'
+grpc_endpoint = 'https://ebony-grpc.finschia.io'
+rpc_endpoint = 'https://ebony-rpc.finschia.io'
+
+[networks.localnet]
+chain_id = 'simd-testing'
+network_variant = 'Shared'
+grpc_endpoint = 'http://localhost:9090'
+rpc_endpoint = 'http://localhost:26657'
+
+[accounts.test1]
+mnemonic = 'notice oak worry limit wrap speak medal online prefer cluster roof addict wrist behave treat actual wasp year salad speed social layer crew genius'
+
+# workspace
+[workspace.template]
+name = 'workspace-template'
+repo = 'https://github.com/ulbqb/beaker-workspace.git'
+branch = 'main'
+subfolder = '.'
+target_dir = '.'
+
+# wasm
+[wasm]
+contract_dir = 'contracts'
+optimizer_version = '0.13.0'
+
+[wasm.template_repos]
+cw20 = 'https://github.com/ulbqb/cw20-template'
+cw721 = 'https://github.com/ulbqb/cw721-template'
+
+# console
+[console]
+account_namespace = true
+contract_namespace = true

@@ -1,0 +1,1 @@
+# FCW Beaker Workspace Template
