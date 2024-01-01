@@ -1,1 +1,0 @@
-# liquid-staking-token
