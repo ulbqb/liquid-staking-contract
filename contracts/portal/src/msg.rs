@@ -25,7 +25,7 @@ pub enum MigrateMsg {}
 #[derive(QueryResponses)]
 pub enum QueryMsg {
     #[returns(EnvResponse)]
-    Env{}
+    PortalEnv{}
 }
 
 // We define a custom struct for each query response

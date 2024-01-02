@@ -11,7 +11,7 @@ pub struct PortalEnv {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct Info {
+pub struct LiquidStakingData {
     pub token_address: String,
     pub delegator_address: String,
 }
@@ -23,6 +23,6 @@ pub struct Buffer {
     pub delegator_address: String,
 }
 
-pub const ENV: Item<PortalEnv> = Item::new("env");
-pub const INFO: Map<String, Vec<Info>> = Map::new("info");
+pub const PORTAL_ENV: Item<PortalEnv> = Item::new("portal_env");
+pub const LS_DATA: Map<String, Vec<LiquidStakingData>> = Map::new("ls_data");
 pub const BUFFER: Item<Buffer> = Item::new("buffer");
