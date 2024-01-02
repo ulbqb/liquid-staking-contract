@@ -1,16 +1,21 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, WasmMsg, SubMsg, SubMsgResult, StdError, SubMsgResponse, Event};
+use cosmwasm_std::{to_json_binary, Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, WasmMsg, SubMsg, SubMsgResult, StdError, SubMsgResponse, Event, Empty, Coin};
 use cw2::set_contract_version;
+use cw20::Cw20Coin;
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg, EnvResponse};
-use crate::state::{PortalEnv, ENV};
+use crate::state::{PortalEnv, Info, Buffer, ENV, INFO, BUFFER};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:portal";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// callback id 
 pub const INIT_CALLBACK_ID: u64 = 0;
+pub const EXEC_DELEGATE_CALLBACK_ID: u64 = 1;
+pub const EXEC_MINT_TOKEN_CALLBACK_ID: u64 = 2;
 
 /// Handling contract instantiation
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -70,27 +75,49 @@ pub fn migrate(_deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, C
 /// Handling contract execution
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
-    _deps: DepsMut,
-    _env: Env,
+    deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::DelegateAndTokenize { validator } => execute_delegate_and_tokenize(info, validator),
+        ExecuteMsg::DelegateAndTokenize { validator } => execute_delegate_and_tokenize(deps, env, info, validator),
     }
 }
 
-fn execute_delegate_and_tokenize(_info: MessageInfo, _validator: String) -> Result<Response, ContractError> {
+fn execute_delegate_and_tokenize(deps: DepsMut, env: Env, info: MessageInfo, validator: String) -> Result<Response, ContractError> {
     // validate info
     // validate msg
 
+    let portal_env = ENV.load(deps.storage)?;
+
+    // store buffer
+    let buffer = Buffer {
+        sender_address: info.sender.to_string(),
+        validator_address: validator.clone(),
+        delegator_address: "".to_string(),
+    };
+    BUFFER.remove(deps.storage);
+    BUFFER.save(deps.storage, &buffer)?;
+
     // instantiate delegator
+    let delegator_init_msg = delegator::msg::InstantiateMsg {
+        validator: validator.clone(),
+    };
+    let delegator_wasm_init_msg = WasmMsg::Instantiate {
+        admin: Some(env.contract.address.to_string()),
+        code_id: portal_env.delegator_code_id,
+        msg: to_json_binary(&delegator_init_msg)?,
+        funds: info.funds.clone(),
+        label: "Liquid Staking Contract Delegator".to_string(),
+    };
+    let delegator_wasm_init_submsg = SubMsg::reply_on_success(delegator_wasm_init_msg, EXEC_DELEGATE_CALLBACK_ID);
 
-    // instantiate cw20
-
-    // mint cw721
-
-    Ok(Response::new())
+    Ok(Response::new()
+        .add_submessage(delegator_wasm_init_submsg)
+        // .add_submessage(cw20_wasm_init_submsg)
+        // .add_submessage(cw721_wasm_exec_submsg)
+        .add_attribute("method", "execute_delegate_and_tokenize"))
 }
 
 /// Handling contract query
@@ -113,9 +140,11 @@ fn query_env(deps: Deps) -> StdResult<EnvResponse> {
 /// Handling submessage reply.
 /// For more info on submessage and reply, see https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md#submessages
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> StdResult<Response> {
+pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
     match (msg.id, msg.result) {
         (INIT_CALLBACK_ID, SubMsgResult::Ok(response)) => handle_init_callback(deps, response),
+        (EXEC_DELEGATE_CALLBACK_ID, SubMsgResult::Ok(response)) => handle_exec_delegate_callback(deps, env, response),
+        (EXEC_MINT_TOKEN_CALLBACK_ID, SubMsgResult::Ok(response)) => handle_exec_mint_token_callback(deps, response),
         _ => Err(StdError::generic_err("invalid reply id or result")),
     }
 }
@@ -138,6 +167,97 @@ pub fn handle_init_callback(deps: DepsMut, response: SubMsgResponse) -> StdResul
         .add_attribute("address", contract_addr.to_string()))
 }
 
+pub fn handle_exec_delegate_callback(deps: DepsMut, env: Env, response: SubMsgResponse) -> StdResult<Response> {
+    // parse contract info from events
+    let delegator_addr = match parse_contract_from_event(response.events.clone()) {
+        Some(addr) => deps.api.addr_validate(&addr),
+        None => Err(StdError::generic_err(
+            "No _contract_address found in callback events",
+        )),
+    }?;
+
+    let delegate_coin = match parse_delegate_amount_from_event(response.events.clone()) {
+        Some(coin) => Ok(coin.parse::<Coin>().unwrap()),
+        None => Err(StdError::generic_err(
+            "No _contract_address found in callback events",
+        )),
+    }?;
+
+    let mut buffer = BUFFER.load(deps.storage)?;
+    buffer.delegator_address = delegator_addr.to_string();
+    BUFFER.save(deps.storage, &buffer)?;
+
+    let portal_env = ENV.load(deps.storage)?;
+
+    // instantiate cw20
+    let cw20_init_msg = cw20_base::msg::InstantiateMsg {
+        name: "Liquid Staking Contract Token".to_string(),
+        symbol:  "LSCT".to_string(),
+        decimals: 6,
+        initial_balances: vec![
+            Cw20Coin{
+                address: buffer.sender_address,
+                amount: delegate_coin.amount,
+            }
+        ],
+        mint: None,
+        marketing: None,
+    };
+    let cw20_wasm_init_msg = WasmMsg::Instantiate {
+        admin: Some(env.contract.address.to_string()),
+        code_id: portal_env.cw20_code_id,
+        msg: to_json_binary(&cw20_init_msg)?,
+        funds: vec![],
+        label: "Liquid Staking Contract Token".to_string(),
+    };
+    let cw20_wasm_init_submsg = SubMsg::reply_on_success(cw20_wasm_init_msg, EXEC_MINT_TOKEN_CALLBACK_ID);
+
+    Ok(Response::new()
+        .add_submessage(cw20_wasm_init_submsg))
+}
+
+pub fn handle_exec_mint_token_callback(deps: DepsMut, response: SubMsgResponse) -> StdResult<Response> {
+    let buffer = BUFFER.load(deps.storage)?;
+    let mut info = match INFO.load(deps.storage, buffer.validator_address.clone()) {
+        Ok(info) => info,
+        Err(_) => vec![],
+    };
+    let lsc_id = buffer.validator_address.clone() + "/" + &info.len().to_string();
+    let portal_env = ENV.load(deps.storage)?;
+
+    let token_addr = match parse_contract_from_event(response.events.clone()) {
+        Some(addr) => deps.api.addr_validate(&addr),
+        None => Err(StdError::generic_err(
+            "No _contract_address found in callback events",
+        )),
+    }?;
+
+    let lst_info = Info {
+        token_address: token_addr.to_string(),
+        delegator_address: buffer.delegator_address.clone(),
+    };
+    info.push(lst_info);
+    INFO.save(deps.storage, buffer.validator_address.clone(), &info)?;
+
+    // mint cw721
+    let cw721_mint_msg = cw721_base::msg::ExecuteMsg::<Empty, Empty>::Mint {
+        token_id: lsc_id,
+        owner: buffer.sender_address,
+        token_uri: None,
+        extension: Empty{},
+    };
+    let cw721_wasm_exec_msg = WasmMsg::Execute {
+        contract_addr: portal_env.cw721_address,
+        msg: to_json_binary(&cw721_mint_msg)?,
+        funds: vec![],
+    };
+    
+    Ok(Response::new()
+        .add_message(cw721_wasm_exec_msg)
+        .add_attribute("token_address", token_addr.to_string())
+        .add_attribute("delegator_address", buffer.delegator_address.clone()))
+}
+
 fn parse_contract_from_event(events: Vec<Event>) -> Option<String> {
     events
         .into_iter()
@@ -148,4 +268,17 @@ fn parse_contract_from_event(events: Vec<Event>) -> Option<String> {
                 .find(|a| a.key == "_contract_address")
         })
         .map(|a| a.value)
+}
+
+fn parse_delegate_amount_from_event(events: Vec<Event>) -> Option<String> {
+    let amout_str = events
+        .into_iter()
+        .find(|e| e.ty == "delegate")
+        .and_then(|ev| {
+            ev.attributes
+                .into_iter()
+                .find(|a| a.key == "amount")
+        })
+        .map(|a| a.value);
+    amout_str
 }
