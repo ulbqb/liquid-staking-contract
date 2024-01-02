@@ -24,5 +24,5 @@ pub struct Buffer {
 }
 
 pub const PORTAL_ENV: Item<PortalEnv> = Item::new("portal_env");
-pub const LS_DATA: Map<String, Vec<LiquidStakingData>> = Map::new("ls_data");
+pub const LS_DATA: Map<(&str, u32), LiquidStakingData> = Map::new("ls_data");
 pub const BUFFER: Item<Buffer> = Item::new("buffer");

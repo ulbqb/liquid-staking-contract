@@ -1,14 +1,16 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Binary, Coin, Deps, DepsMut, Empty, Env, Event, MessageInfo, Reply, Response,
-    StdError, StdResult, SubMsg, SubMsgResponse, SubMsgResult, WasmMsg,
+    to_json_binary, Binary, Coin, Deps, DepsMut, Empty, Env, Event, MessageInfo, Order, Reply,
+    Response, StdError, StdResult, SubMsg, SubMsgResponse, SubMsgResult, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20Coin;
 
 use crate::error::ContractError;
-use crate::msg::{EnvResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg};
+use crate::msg::{
+    AllResponse, DataResponse, EnvResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg,
+};
 use crate::state::{Buffer, LiquidStakingData, PortalEnv, BUFFER, LS_DATA, PORTAL_ENV};
 
 // version info for migration info
@@ -135,17 +137,38 @@ fn execute_delegate_and_tokenize(
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::PortalEnv {} => to_json_binary(&query_portal_env(deps)?),
+        QueryMsg::Env {} => to_json_binary(&query_env(deps)?),
+        QueryMsg::Data { id } => to_json_binary(&query_data(deps, id)?),
+        QueryMsg::All {} => to_json_binary(&query_all(deps)?),
     }
 }
 
-fn query_portal_env(deps: Deps) -> StdResult<EnvResponse> {
+fn query_env(deps: Deps) -> StdResult<EnvResponse> {
     let portal_env = PORTAL_ENV.load(deps.storage)?;
     Ok(EnvResponse {
         cw20_code_id: portal_env.cw20_code_id,
         cw721_address: portal_env.cw721_address,
         delegator_code_id: portal_env.delegator_code_id,
     })
+}
+
+fn query_data(deps: Deps, id: String) -> StdResult<DataResponse> {
+    let splited: Vec<&str> = id.split('/').collect();
+    let prefix = splited[0];
+    let id: u32 = splited[1].trim().parse().unwrap();
+    let data = LS_DATA.load(deps.storage, (prefix, id))?;
+    Ok(DataResponse {
+        token_address: data.token_address,
+        delegator_address: data.delegator_address,
+    })
+}
+
+fn query_all(deps: Deps) -> StdResult<AllResponse> {
+    let all: StdResult<Vec<String>> = LS_DATA
+        .keys(deps.storage, None, None, Order::Ascending)
+        .map(|item| item.map(|(prefix, id)| prefix + "/" + &id.to_string()))
+        .collect();
+    Ok(AllResponse { data: all? })
 }
 
 /// Handling submessage reply.
@@ -250,11 +273,12 @@ pub fn handle_exec_delegate_and_tokenize_callback_2(
     response: SubMsgResponse,
 ) -> StdResult<Response> {
     let buffer = BUFFER.load(deps.storage)?;
-    let mut info = match LS_DATA.load(deps.storage, buffer.validator_address.clone()) {
-        Ok(info) => info,
-        Err(_) => vec![],
-    };
-    let lsc_id = buffer.validator_address.clone() + "/" + &info.len().to_string();
+    let ls_data: StdResult<Vec<_>> = LS_DATA
+        .prefix(&buffer.validator_address.clone())
+        .range(deps.storage, None, None, Order::Ascending)
+        .collect();
+    let data_num = ls_data.unwrap().len();
+    let ls_id = buffer.validator_address.clone() + "/" + &data_num.to_string();
     let portal_env = PORTAL_ENV.load(deps.storage)?;
 
     let token_addr = match parse_from_event(
@@ -268,16 +292,19 @@ pub fn handle_exec_delegate_and_tokenize_callback_2(
         )),
     }?;
 
-    let lst_info = LiquidStakingData {
+    let data = LiquidStakingData {
         token_address: token_addr.to_string(),
         delegator_address: buffer.delegator_address.clone(),
     };
-    info.push(lst_info);
-    LS_DATA.save(deps.storage, buffer.validator_address.clone(), &info)?;
+    LS_DATA.save(
+        deps.storage,
+        (&buffer.validator_address.clone(), data_num as u32),
+        &data,
+    )?;
 
     // mint cw721
     let cw721_mint_msg = cw721_base::msg::ExecuteMsg::<Empty, Empty>::Mint {
-        token_id: lsc_id,
+        token_id: ls_id,
         owner: buffer.sender_address,
         token_uri: None,
         extension: Empty {},

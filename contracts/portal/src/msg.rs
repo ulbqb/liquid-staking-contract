@@ -11,9 +11,7 @@ pub struct InstantiateMsg {
 /// Message type for `execute` entry_point
 #[cw_serde]
 pub enum ExecuteMsg {
-    DelegateAndTokenize{
-        validator: String,
-    }
+    DelegateAndTokenize { validator: String },
 }
 
 /// Message type for `migrate` entry_point
@@ -25,7 +23,13 @@ pub enum MigrateMsg {}
 #[derive(QueryResponses)]
 pub enum QueryMsg {
     #[returns(EnvResponse)]
-    PortalEnv{}
+    Env {},
+
+    #[returns(DataResponse)]
+    Data { id: String },
+
+    #[returns(AllResponse)]
+    All {},
 }
 
 // We define a custom struct for each query response
@@ -34,4 +38,15 @@ pub struct EnvResponse {
     pub cw20_code_id: u64,
     pub cw721_address: String,
     pub delegator_code_id: u64,
+}
+
+#[cw_serde]
+pub struct DataResponse {
+    pub token_address: String,
+    pub delegator_address: String,
+}
+
+#[cw_serde]
+pub struct AllResponse {
+    pub data: Vec<String>,
 }
