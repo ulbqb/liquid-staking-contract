@@ -1,6 +1,9 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
-use cosmwasm_std::{Binary, Deps, DepsMut, Env, MessageInfo, Reply, Response, StdResult, StakingMsg};
+use cosmwasm_std::{
+    Binary, Deps, DepsMut, DistributionMsg, Env, MessageInfo, Reply, Response, StakingMsg,
+    StdResult,
+};
 use cw2::set_contract_version;
 
 use crate::error::ContractError;
@@ -22,6 +25,8 @@ pub fn instantiate(
 
     // TODO: validate info
     // TODO: validate msg
+
+    cw_ownable::initialize_owner(deps.storage, deps.api, Some(&info.sender.to_string()))?;
 
     let delegate_msg = StakingMsg::Delegate {
         validator: msg.validator,
@@ -52,17 +57,38 @@ pub fn migrate(_deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, C
 /// Handling contract execution
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
-    _deps: DepsMut,
-    _env: Env,
-    _info: MessageInfo,
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
+    cw_ownable::assert_owner(deps.storage, &info.sender).unwrap();
+
     match msg {
-        // Find matched incoming message variant and execute them with your custom logic.
-        //
-        // With `Response` type, it is possible to dispatch message to invoke external logic.
-        // See: https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md#dispatching-messages
+        ExecuteMsg::WithdrawReward { recipient } => execute_withdraw_reward(deps, env, recipient),
     }
+}
+
+fn execute_withdraw_reward(
+    deps: DepsMut,
+    env: Env,
+    recipient: String,
+) -> Result<Response, ContractError> {
+    // get validator
+    let delegations = deps
+        .querier
+        .query_all_delegations(env.contract.clone().address)?;
+
+    Ok(Response::new()
+        .add_message(DistributionMsg::SetWithdrawAddress { address: recipient })
+        .add_message(DistributionMsg::WithdrawDelegatorReward {
+            validator: delegations[0].validator.clone(),
+        })
+        .add_message(DistributionMsg::SetWithdrawAddress {
+            address: env.contract.clone().address.to_string(),
+        })
+        .add_attribute("method", "execute")
+        .add_attribute("action", "withdraw_reward"))
 }
 
 /// Handling contract query

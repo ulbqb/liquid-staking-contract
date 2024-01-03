@@ -2,7 +2,7 @@
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     to_json_binary, Binary, Coin, Deps, DepsMut, Empty, Env, Event, MessageInfo, Order, Reply,
-    Response, StdError, StdResult, SubMsg, SubMsgResponse, SubMsgResult, WasmMsg,
+    Response, StdError, StdResult, Storage, SubMsg, SubMsgResponse, SubMsgResult, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20Coin;
@@ -21,6 +21,7 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const INIT_CALLBACK_ID: u64 = 0;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_1: u64 = 1;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2: u64 = 2;
+pub const NONE_CALLBACK_ID: u64 = 100;
 
 /// Handling contract instantiation
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -88,6 +89,7 @@ pub fn execute(
         ExecuteMsg::DelegateAndTokenize { validator } => {
             execute_delegate_and_tokenize(deps, env, info, validator)
         }
+        ExecuteMsg::WithdrawAllReward {} => execute_withdraw_all_reward(deps, info),
     }
 }
 
@@ -133,6 +135,45 @@ fn execute_delegate_and_tokenize(
         .add_attribute("action", "delegate_and_tokenize"))
 }
 
+fn execute_withdraw_all_reward(
+    deps: DepsMut,
+    info: MessageInfo,
+) -> Result<Response, ContractError> {
+    let portal_env = PORTAL_ENV.load(deps.storage)?;
+
+    // get all nft
+    let query_tokens_msg = cw721_base::QueryMsg::<Empty>::Tokens {
+        owner: info.sender.clone().to_string(),
+        start_after: None,
+        limit: None,
+    };
+    let records: cw721::TokensResponse = deps
+        .querier
+        .query_wasm_smart(portal_env.cw721_address, &query_tokens_msg)?;
+    // get delegators
+    let delegators: Vec<String> = records
+        .tokens
+        .into_iter()
+        .map(|item| load_ls_data(deps.storage, item).unwrap().delegator_address)
+        .collect();
+
+    // send getting reward to delegetors
+    let mut res = Response::new();
+    for del in delegators.iter() {
+        let delegator_withdraw_reward_msg = delegator::msg::ExecuteMsg::WithdrawReward {
+            recipient: info.sender.clone().to_string(),
+        };
+        let delegator_wasm_exec_msg = WasmMsg::Execute {
+            contract_addr: del.clone(),
+            msg: to_json_binary(&delegator_withdraw_reward_msg)?,
+            funds: vec![],
+        };
+        res = res.add_message(delegator_wasm_exec_msg)
+    }
+
+    Ok(res)
+}
+
 /// Handling contract query
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
@@ -153,10 +194,7 @@ fn query_env(deps: Deps) -> StdResult<EnvResponse> {
 }
 
 fn query_data(deps: Deps, id: String) -> StdResult<DataResponse> {
-    let splited: Vec<&str> = id.split('/').collect();
-    let prefix = splited[0];
-    let id: u32 = splited[1].trim().parse().unwrap();
-    let data = LS_DATA.load(deps.storage, (prefix, id))?;
+    let data = load_ls_data(deps.storage, id)?;
     Ok(DataResponse {
         token_address: data.token_address,
         delegator_address: data.delegator_address,
@@ -182,6 +220,9 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
         }
         (EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2, SubMsgResult::Ok(response)) => {
             handle_exec_delegate_and_tokenize_callback_2(deps, response)
+        }
+        (NONE_CALLBACK_ID, SubMsgResult::Ok(_)) => {
+            Ok(Response::new())
         }
         _ => Err(StdError::generic_err("invalid reply id or result")),
     }
@@ -230,9 +271,7 @@ pub fn handle_exec_delegate_and_tokenize_callback_1(
         "amount".to_string(),
     ) {
         Some(coin) => Ok(coin.parse::<Coin>().unwrap()),
-        None => Err(StdError::generic_err(
-            "No _contract_address found in callback events",
-        )),
+        None => Err(StdError::generic_err("No amount found in callback events")),
     }?;
 
     let mut buffer = BUFFER.load(deps.storage)?;
@@ -326,4 +365,11 @@ fn parse_from_event(events: Vec<Event>, ty: String, key: String) -> Option<Strin
         .find(|e| e.ty == ty)
         .and_then(|ev| ev.attributes.into_iter().find(|a| a.key == key))
         .map(|a| a.value)
+}
+
+fn load_ls_data(store: &dyn Storage, id: String) -> StdResult<LiquidStakingData> {
+    let splited: Vec<&str> = id.split('/').collect();
+    let prefix = splited[0];
+    let id: u32 = splited[1].trim().parse().unwrap();
+    LS_DATA.load(store, (prefix, id))
 }

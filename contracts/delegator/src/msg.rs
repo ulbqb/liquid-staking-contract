@@ -8,7 +8,9 @@ pub struct InstantiateMsg {
 
 /// Message type for `execute` entry_point
 #[cw_serde]
-pub enum ExecuteMsg {}
+pub enum ExecuteMsg {
+    WithdrawReward { recipient: String },
+}
 
 /// Message type for `migrate` entry_point
 #[cw_serde]

@@ -12,6 +12,7 @@ pub struct InstantiateMsg {
 #[cw_serde]
 pub enum ExecuteMsg {
     DelegateAndTokenize { validator: String },
+    WithdrawAllReward {},
 }
 
 /// Message type for `migrate` entry_point

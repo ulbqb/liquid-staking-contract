@@ -41,16 +41,17 @@ optimize = """docker run --rm -v "$(pwd)":/code \
 
 [dependencies]
 cosmwasm-schema = "1.5.0"
-cosmwasm-std = {version = "1.5.0"}
+cosmwasm-std = { version = "1.5.0" }
 cw-storage-plus = "1.1.0"
 cw2 = "1.1.1"
 cw20 = "1.1.1"
+cw721 = { version = "0.18.0" }
 schemars = "0.8.15"
-serde = {version = "1.0.189", default-features = false, features = ["derive"]}
-thiserror = {version = "1.0.49"}
-cw20-base = {path = "../cw20-base"}
-cw721-base = {path = "../cw721-base"}
-delegator = {path = "../delegator"}
+serde = { version = "1.0.189", default-features = false, features = ["derive"] }
+thiserror = { version = "1.0.49" }
+cw20-base = { path = "../cw20-base" }
+cw721-base = { path = "../cw721-base" }
+delegator = { path = "../delegator" }
 
 [dev-dependencies]
 cw-multi-test = "0.18.0"
