@@ -2,7 +2,7 @@
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
     to_json_binary, Binary, Coin, Deps, DepsMut, Empty, Env, Event, MessageInfo, Order, Reply,
-    Response, StdError, StdResult, Storage, SubMsg, SubMsgResponse, SubMsgResult, WasmMsg,
+    Response, StdError, StdResult, Storage, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20Coin;
@@ -21,7 +21,6 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const INIT_CALLBACK_ID: u64 = 0;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_1: u64 = 1;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2: u64 = 2;
-pub const NONE_CALLBACK_ID: u64 = 100;
 
 /// Handling contract instantiation
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -90,6 +89,7 @@ pub fn execute(
             execute_delegate_and_tokenize(deps, env, info, validator)
         }
         ExecuteMsg::WithdrawAllReward {} => execute_withdraw_all_reward(deps, info),
+        ExecuteMsg::Undelegate { id, amount } => execute_undelegate(deps, info, id, amount),
     }
 }
 
@@ -174,6 +174,37 @@ fn execute_withdraw_all_reward(
     Ok(res)
 }
 
+fn execute_undelegate(
+    deps: DepsMut,
+    info: MessageInfo,
+    id: String,
+    amount: Uint128,
+) -> Result<Response, ContractError> {
+    let data = load_ls_data(deps.storage, id.clone())?;
+
+    // burn lst
+    let cw20_exec_burn_from_msg = cw20_base::msg::ExecuteMsg::BurnFrom {
+        owner: info.sender.to_string(),
+        amount: amount.clone(),
+    };
+
+    let delegator_undelegate_msg = delegator::msg::ExecuteMsg::Undelegate {
+        amount: amount.clone(),
+    };
+
+    Ok(Response::new()
+        .add_message(WasmMsg::Execute {
+            contract_addr: data.token_address,
+            msg: to_json_binary(&cw20_exec_burn_from_msg)?,
+            funds: vec![],
+        })
+        .add_message(WasmMsg::Execute {
+            contract_addr: data.delegator_address,
+            msg: to_json_binary(&delegator_undelegate_msg)?,
+            funds: vec![],
+        }))
+}
+
 /// Handling contract query
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
@@ -220,9 +251,6 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
         }
         (EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2, SubMsgResult::Ok(response)) => {
             handle_exec_delegate_and_tokenize_callback_2(deps, response)
-        }
-        (NONE_CALLBACK_ID, SubMsgResult::Ok(_)) => {
-            Ok(Response::new())
         }
         _ => Err(StdError::generic_err("invalid reply id or result")),
     }

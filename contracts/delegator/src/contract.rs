@@ -1,8 +1,8 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    Binary, Deps, DepsMut, DistributionMsg, Env, MessageInfo, Reply, Response, StakingMsg,
-    StdResult,
+    BankMsg, Binary, Coin, Deps, DepsMut, DistributionMsg, Env, MessageInfo, Reply, Response,
+    StakingMsg, StdResult, Uint128,
 };
 use cw2::set_contract_version;
 
@@ -66,6 +66,10 @@ pub fn execute(
 
     match msg {
         ExecuteMsg::WithdrawReward { recipient } => execute_withdraw_reward(deps, env, recipient),
+        ExecuteMsg::Undelegate { amount } => execute_undelegate(deps, env, amount),
+        ExecuteMsg::SendCoin { recipient, amount } => {
+            execute_send_coin(deps, recipient, amount)
+        }
     }
 }
 
@@ -89,6 +93,44 @@ fn execute_withdraw_reward(
         })
         .add_attribute("method", "execute")
         .add_attribute("action", "withdraw_reward"))
+}
+
+fn execute_undelegate(deps: DepsMut, env: Env, amount: Uint128) -> Result<Response, ContractError> {
+    let delegations = deps
+        .querier
+        .query_all_delegations(env.contract.clone().address)?;
+
+    let coin = Coin {
+        denom: deps.querier.query_bonded_denom()?,
+        amount: amount,
+    };
+
+    Ok(Response::new()
+        .add_message(StakingMsg::Undelegate {
+            validator: delegations[0].validator.clone(),
+            amount: coin.clone(),
+        })
+        .add_attribute("method", "execute")
+        .add_attribute("action", "undelegate"))
+}
+
+fn execute_send_coin(
+    deps: DepsMut,
+    recipient: String,
+    amount: Uint128,
+) -> Result<Response, ContractError> {
+    let coin = Coin {
+        denom: deps.querier.query_bonded_denom()?,
+        amount: amount,
+    };
+
+    Ok(Response::new()
+        .add_message(BankMsg::Send {
+            to_address: recipient.clone(),
+            amount: vec![coin.clone()],
+        })
+        .add_attribute("method", "execute")
+        .add_attribute("action", "send_coin"))
 }
 
 /// Handling contract query

@@ -1,4 +1,5 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
+use cosmwasm_std::Uint128;
 
 /// Message type for `instantiate` entry_point
 #[cw_serde]
@@ -13,6 +14,7 @@ pub struct InstantiateMsg {
 pub enum ExecuteMsg {
     DelegateAndTokenize { validator: String },
     WithdrawAllReward {},
+    Undelegate { id: String, amount: Uint128 },
 }
 
 /// Message type for `migrate` entry_point
