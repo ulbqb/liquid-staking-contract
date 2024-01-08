@@ -1,24 +1,31 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_json_binary, Binary, Coin, Deps, DepsMut, Empty, Env, Event, MessageInfo, Order, Reply,
-    Response, StdError, StdResult, Storage, SubMsg, SubMsgResponse, SubMsgResult, Uint128, WasmMsg,
+    instantiate2_address, to_json_binary, Addr, Api, Binary, CanonicalAddr, CosmosMsg, Deps,
+    DepsMut, Empty, Env, MessageInfo, Order, QuerierWrapper, Reply, Response, StdError, StdResult,
+    Storage, Uint128, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::Cw20Coin;
+use prost::Message;
 
+use crate::cosmos_msg::{CosmosCoin, MsgInstantiateContract2};
 use crate::error::ContractError;
 use crate::msg::{
     AllResponse, DataResponse, EnvResponse, ExecuteMsg, InstantiateMsg, MigrateMsg, QueryMsg,
 };
-use crate::state::{Buffer, LiquidStakingData, PortalEnv, BUFFER, LS_DATA, PORTAL_ENV};
+use crate::querier::query_wasm_code_hash;
+use crate::state::{LiquidStakingData, PortalEnv, LS_DATA, PORTAL_ENV};
+use sha2::{
+    digest::{Digest, Update},
+    Sha256,
+};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:portal";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // callback id
-pub const INIT_CALLBACK_ID: u64 = 0;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_1: u64 = 1;
 pub const EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2: u64 = 2;
 
@@ -32,33 +39,49 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    // instantiate cw721 for record
-    let cw721_init_msg = cw721_base::msg::InstantiateMsg {
-        name: "Liquid Staking Contract Record".to_string(),
-        symbol: "SLCR".to_string(),
-        minter: env.contract.address.to_string(),
-    };
-    let cw721_wasm_init_msg = WasmMsg::Instantiate {
-        admin: Some(env.contract.address.to_string()),
+    let creator = deps.api.addr_canonicalize(env.contract.address.as_str())?;
+    let salt = b"instantiate";
+    let cw721_address = instantiate_address(
+        deps.api,
+        deps.querier,
+        creator.clone(),
+        msg.cw721_code_id,
+        salt,
+    )?;
+
+    let cw721_wasm_init_msg = MsgInstantiateContract2 {
+        sender: env.contract.address.to_string(),
+        admin: env.contract.address.to_string(),
         code_id: msg.cw721_code_id,
-        msg: to_json_binary(&cw721_init_msg)?,
+        msg: to_json_binary(&cw721_base::msg::InstantiateMsg {
+            name: "Liquid Staking Contract Record".to_string(),
+            symbol: "SLCR".to_string(),
+            minter: env.contract.address.to_string(),
+        })?
+        .to_vec(),
         funds: vec![],
         label: "Liquid Staking Contract Record".to_string(),
+        salt: salt.to_vec(),
+        fix_msg: false,
     };
-    let cw721_wasm_init_submsg = SubMsg::reply_on_success(cw721_wasm_init_msg, INIT_CALLBACK_ID);
 
-    // store cw20 code id, cw721 address, delegator code id
-    let portal_env = PortalEnv {
-        cw20_code_id: msg.cw20_code_id,
-        cw721_address: "".to_string(),
-        delegator_code_id: msg.delegator_code_id,
-    };
-    PORTAL_ENV.save(deps.storage, &portal_env)?;
+    PORTAL_ENV.save(
+        deps.storage,
+        &PortalEnv {
+            cw20_code_id: msg.cw20_code_id,
+            cw721_address: cw721_address.to_string(),
+            delegator_code_id: msg.delegator_code_id,
+        },
+    )?;
 
     Ok(Response::new()
-        .add_submessage(cw721_wasm_init_submsg)
+        .add_message(CosmosMsg::Stargate {
+            type_url: "/cosmwasm.wasm.v1.MsgInstantiateContract2".to_string(),
+            value: cw721_wasm_init_msg.encode_to_vec().into(),
+        })
         .add_attribute("method", "instantiate")
-        .add_attribute("owner", info.sender))
+        .add_attribute("owner", info.sender)
+        .add_attribute("cw721_address", cw721_address.to_string()))
 }
 
 /// Handling contract migration
@@ -102,35 +125,105 @@ fn execute_delegate_and_tokenize(
     // TODO: validate info
     // TODO: validate msg
 
-    let portal_env = PORTAL_ENV.load(deps.storage)?;
+    let ls_data: StdResult<Vec<_>> = LS_DATA
+        .prefix(&validator.clone())
+        .range(deps.storage, None, None, Order::Ascending)
+        .collect();
+    let data_num = ls_data.unwrap().len();
+    let ls_id = validator.clone() + "/" + &data_num.to_string();
 
-    // store buffer
-    let buffer = Buffer {
-        sender_address: info.sender.to_string(),
-        validator_address: validator.clone(),
-        delegator_address: "".to_string(),
-    };
-    BUFFER.remove(deps.storage);
-    BUFFER.save(deps.storage, &buffer)?;
+    let portal_env = PORTAL_ENV.load(deps.storage)?;
+    let creator = deps.api.addr_canonicalize(env.contract.address.as_str())?;
+    let salt = Sha256::digest(creator.to_string() + &ls_id.clone());
+    let delegator_address = instantiate_address(
+        deps.api,
+        deps.querier,
+        creator.clone(),
+        portal_env.delegator_code_id,
+        &*salt,
+    )?;
 
     // instantiate delegator
-    let delegator_init_msg = delegator::msg::InstantiateMsg {
-        validator: validator.clone(),
-    };
-    let delegator_wasm_init_msg = WasmMsg::Instantiate {
-        admin: Some(env.contract.address.to_string()),
+    let delegator_wasm_init_msg = MsgInstantiateContract2 {
+        sender: env.contract.address.to_string(),
+        admin: env.contract.address.to_string(),
         code_id: portal_env.delegator_code_id,
-        msg: to_json_binary(&delegator_init_msg)?,
-        funds: info.funds.clone(),
+        msg: to_json_binary(&delegator::msg::InstantiateMsg {
+            validator: validator.clone(),
+        })?
+        .to_vec(),
+        funds: vec![CosmosCoin {
+            denom: info.funds[0].denom.clone(),
+            amount: info.funds[0].amount.to_string(),
+        }],
         label: "Liquid Staking Contract Delegator".to_string(),
+        salt: salt.to_vec(),
+        fix_msg: false,
     };
-    let delegator_wasm_init_submsg = SubMsg::reply_on_success(
-        delegator_wasm_init_msg,
-        EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_1,
-    );
+
+    let cw20_address = instantiate_address(
+        deps.api,
+        deps.querier,
+        creator.clone(),
+        portal_env.cw20_code_id,
+        &*salt,
+    )?;
+
+    let cw20_init_msg = cw20_base::msg::InstantiateMsg {
+        name: "Liquid Staking Contract Token".to_string(),
+        symbol: "LSCT".to_string(),
+        decimals: 6,
+        initial_balances: vec![Cw20Coin {
+            address: info.sender.to_string(),
+            amount: info.funds[0].amount.clone(),
+        }],
+        mint: None,
+        marketing: None,
+    };
+
+    let cw20_wasm_init_msg = MsgInstantiateContract2 {
+        sender: env.contract.address.to_string(),
+        admin: env.contract.address.to_string(),
+        code_id: portal_env.cw20_code_id,
+        msg: to_json_binary(&cw20_init_msg)?.to_vec(),
+        funds: vec![],
+        label: "Liquid Staking Contract Token".to_string(),
+        salt: salt.to_vec(),
+        fix_msg: false,
+    };
+
+    // mint cw721
+    let cw721_mint_msg = cw721_base::msg::ExecuteMsg::<Empty, Empty>::Mint {
+        token_id: ls_id,
+        owner: info.sender.to_string(),
+        token_uri: None,
+        extension: Empty {},
+    };
+    let cw721_wasm_exec_msg = WasmMsg::Execute {
+        contract_addr: portal_env.cw721_address,
+        msg: to_json_binary(&cw721_mint_msg)?,
+        funds: vec![],
+    };
+
+    LS_DATA.save(
+        deps.storage,
+        (&validator.clone(), data_num as u32),
+        &LiquidStakingData {
+            token_address: cw20_address.to_string(),
+            delegator_address: delegator_address.to_string(),
+        },
+    )?;
 
     Ok(Response::new()
-        .add_submessage(delegator_wasm_init_submsg)
+        .add_message(CosmosMsg::Stargate {
+            type_url: "/cosmwasm.wasm.v1.MsgInstantiateContract2".to_string(),
+            value: delegator_wasm_init_msg.encode_to_vec().into(),
+        })
+        .add_message(CosmosMsg::Stargate {
+            type_url: "/cosmwasm.wasm.v1.MsgInstantiateContract2".to_string(),
+            value: cw20_wasm_init_msg.encode_to_vec().into(),
+        })
+        .add_message(cw721_wasm_exec_msg)
         .add_attribute("method", "execute")
         .add_attribute("action", "delegate_and_tokenize"))
 }
@@ -243,156 +336,11 @@ fn query_all(deps: Deps) -> StdResult<AllResponse> {
 /// Handling submessage reply.
 /// For more info on submessage and reply, see https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md#submessages
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> StdResult<Response> {
-    match (msg.id, msg.result) {
-        (INIT_CALLBACK_ID, SubMsgResult::Ok(response)) => handle_init_callback(deps, response),
-        (EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_1, SubMsgResult::Ok(response)) => {
-            handle_exec_delegate_and_tokenize_callback_1(deps, env, response)
-        }
-        (EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2, SubMsgResult::Ok(response)) => {
-            handle_exec_delegate_and_tokenize_callback_2(deps, response)
-        }
-        _ => Err(StdError::generic_err("invalid reply id or result")),
-    }
-}
+pub fn reply(_deps: DepsMut, _env: Env, _msg: Reply) -> Result<Response, ContractError> {
+    // With `Response` type, it is still possible to dispatch message to invoke external logic.
+    // See: https://github.com/CosmWasm/cosmwasm/blob/main/SEMANTICS.md#dispatching-messages
 
-pub fn handle_init_callback(deps: DepsMut, response: SubMsgResponse) -> StdResult<Response> {
-    // parse contract info from events
-    let contract_addr = match parse_from_event(
-        response.events,
-        "instantiate".to_string(),
-        "_contract_address".to_string(),
-    ) {
-        Some(addr) => deps.api.addr_validate(&addr),
-        None => Err(StdError::generic_err(
-            "No _contract_address found in callback events",
-        )),
-    }?;
-
-    let mut portal_env = PORTAL_ENV.load(deps.storage)?;
-    portal_env.cw721_address = contract_addr.to_string();
-    PORTAL_ENV.save(deps.storage, &portal_env)?;
-
-    Ok(Response::new().add_attribute("action", "handle_init_callback"))
-}
-
-pub fn handle_exec_delegate_and_tokenize_callback_1(
-    deps: DepsMut,
-    env: Env,
-    response: SubMsgResponse,
-) -> StdResult<Response> {
-    // parse contract info from events
-    let delegator_addr = match parse_from_event(
-        response.events.clone(),
-        "instantiate".to_string(),
-        "_contract_address".to_string(),
-    ) {
-        Some(addr) => deps.api.addr_validate(&addr),
-        None => Err(StdError::generic_err(
-            "No _contract_address found in callback events",
-        )),
-    }?;
-
-    let delegate_coin = match parse_from_event(
-        response.events.clone(),
-        "delegate".to_string(),
-        "amount".to_string(),
-    ) {
-        Some(coin) => Ok(coin.parse::<Coin>().unwrap()),
-        None => Err(StdError::generic_err("No amount found in callback events")),
-    }?;
-
-    let mut buffer = BUFFER.load(deps.storage)?;
-    buffer.delegator_address = delegator_addr.to_string();
-    BUFFER.save(deps.storage, &buffer)?;
-
-    let portal_env = PORTAL_ENV.load(deps.storage)?;
-
-    // instantiate cw20
-    let cw20_init_msg = cw20_base::msg::InstantiateMsg {
-        name: "Liquid Staking Contract Token".to_string(),
-        symbol: "LSCT".to_string(),
-        decimals: 6,
-        initial_balances: vec![Cw20Coin {
-            address: buffer.sender_address,
-            amount: delegate_coin.amount,
-        }],
-        mint: None,
-        marketing: None,
-    };
-    let cw20_wasm_init_msg = WasmMsg::Instantiate {
-        admin: Some(env.contract.address.to_string()),
-        code_id: portal_env.cw20_code_id,
-        msg: to_json_binary(&cw20_init_msg)?,
-        funds: vec![],
-        label: "Liquid Staking Contract Token".to_string(),
-    };
-    let cw20_wasm_init_submsg =
-        SubMsg::reply_on_success(cw20_wasm_init_msg, EXEC_DELEGATE_AND_TOKENIZE_CALLBACK_ID_2);
-
-    Ok(Response::new()
-        .add_submessage(cw20_wasm_init_submsg)
-        .add_attribute("action", "handle_exec_delegate_and_tokenize_callback_1"))
-}
-
-pub fn handle_exec_delegate_and_tokenize_callback_2(
-    deps: DepsMut,
-    response: SubMsgResponse,
-) -> StdResult<Response> {
-    let buffer = BUFFER.load(deps.storage)?;
-    let ls_data: StdResult<Vec<_>> = LS_DATA
-        .prefix(&buffer.validator_address.clone())
-        .range(deps.storage, None, None, Order::Ascending)
-        .collect();
-    let data_num = ls_data.unwrap().len();
-    let ls_id = buffer.validator_address.clone() + "/" + &data_num.to_string();
-    let portal_env = PORTAL_ENV.load(deps.storage)?;
-
-    let token_addr = match parse_from_event(
-        response.events.clone(),
-        "instantiate".to_string(),
-        "_contract_address".to_string(),
-    ) {
-        Some(addr) => deps.api.addr_validate(&addr),
-        None => Err(StdError::generic_err(
-            "No _contract_address found in callback events",
-        )),
-    }?;
-
-    let data = LiquidStakingData {
-        token_address: token_addr.to_string(),
-        delegator_address: buffer.delegator_address.clone(),
-    };
-    LS_DATA.save(
-        deps.storage,
-        (&buffer.validator_address.clone(), data_num as u32),
-        &data,
-    )?;
-
-    // mint cw721
-    let cw721_mint_msg = cw721_base::msg::ExecuteMsg::<Empty, Empty>::Mint {
-        token_id: ls_id,
-        owner: buffer.sender_address,
-        token_uri: None,
-        extension: Empty {},
-    };
-    let cw721_wasm_exec_msg = WasmMsg::Execute {
-        contract_addr: portal_env.cw721_address,
-        msg: to_json_binary(&cw721_mint_msg)?,
-        funds: vec![],
-    };
-
-    Ok(Response::new()
-        .add_message(cw721_wasm_exec_msg)
-        .add_attribute("action", "handle_exec_delegate_and_tokenize_callback_2"))
-}
-
-fn parse_from_event(events: Vec<Event>, ty: String, key: String) -> Option<String> {
-    events
-        .into_iter()
-        .find(|e| e.ty == ty)
-        .and_then(|ev| ev.attributes.into_iter().find(|a| a.key == key))
-        .map(|a| a.value)
+    todo!()
 }
 
 fn load_ls_data(store: &dyn Storage, id: String) -> StdResult<LiquidStakingData> {
@@ -400,4 +348,21 @@ fn load_ls_data(store: &dyn Storage, id: String) -> StdResult<LiquidStakingData>
     let prefix = splited[0];
     let id: u32 = splited[1].trim().parse().unwrap();
     LS_DATA.load(store, (prefix, id))
+}
+
+fn instantiate_address(
+    api: &dyn Api,
+    querier: QuerierWrapper,
+    creator: CanonicalAddr,
+    code_id: u64,
+    salt: &[u8],
+) -> StdResult<Addr> {
+    let data_hash = query_wasm_code_hash(querier, code_id);
+    let _address = match instantiate2_address(&data_hash?, &creator, &salt) {
+        Ok(addr) => Ok(addr),
+        Err(err) => Err(StdError::GenericErr {
+            msg: err.to_string(),
+        }),
+    };
+    api.addr_humanize(&_address?)
 }
