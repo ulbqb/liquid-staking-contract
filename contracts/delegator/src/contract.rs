@@ -67,9 +67,6 @@ pub fn execute(
     match msg {
         ExecuteMsg::WithdrawReward { recipient } => execute_withdraw_reward(deps, env, recipient),
         ExecuteMsg::Undelegate { amount } => execute_undelegate(deps, env, amount),
-        ExecuteMsg::SendCoin { recipient, amount } => {
-            execute_send_coin(deps, recipient, amount)
-        }
     }
 }
 
@@ -112,25 +109,6 @@ fn execute_undelegate(deps: DepsMut, env: Env, amount: Uint128) -> Result<Respon
         })
         .add_attribute("method", "execute")
         .add_attribute("action", "undelegate"))
-}
-
-fn execute_send_coin(
-    deps: DepsMut,
-    recipient: String,
-    amount: Uint128,
-) -> Result<Response, ContractError> {
-    let coin = Coin {
-        denom: deps.querier.query_bonded_denom()?,
-        amount: amount,
-    };
-
-    Ok(Response::new()
-        .add_message(BankMsg::Send {
-            to_address: recipient.clone(),
-            amount: vec![coin.clone()],
-        })
-        .add_attribute("method", "execute")
-        .add_attribute("action", "send_coin"))
 }
 
 /// Handling contract query
