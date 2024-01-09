@@ -1,1 +1,2 @@
-# FCW Beaker Workspace Template
+# Liquid Staking Contract
+![Alt text](assets/image.png)
